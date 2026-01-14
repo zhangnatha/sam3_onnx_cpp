@@ -41,3 +41,5 @@ model/*onnx
 model/*txt
 .cache
 cmake-build*
+opencv*
+onnxruntime*
