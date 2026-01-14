@@ -5,6 +5,17 @@
 #include <iostream>
 #include <numeric>
 
+#ifdef USE_CUDA
+#include <cuda_runtime.h>
+#endif
+
+/**
+ * @note 生产环境使用建议：
+ * 1. 避免冷启动：在服务启动时调用 predictor.warmup()
+ * 显式加载模型，规避首次推理的长耗时。
+ * 2. 保持实例持久：SAM3Predictor 将 ONNX Runtime
+ * 会话存储在成员变量中，应在应用生命周期内复用 同一个 predictor 实例。
+ */
 // 构造函数
 SAM3Predictor::SAM3Predictor(const std::string &model_dir, bool use_gpu)
     : env(ORT_LOGGING_LEVEL_WARNING, "SAM3_Inference"),
@@ -12,21 +23,50 @@ SAM3Predictor::SAM3Predictor(const std::string &model_dir, bool use_gpu)
   // 保存配置供延迟加载使用
   this->model_dir = model_dir;
   this->use_gpu = use_gpu;
+
+#ifdef USE_CUDA
+  if (use_gpu) {
+    // 预分配 1008x1008x3 的输入和输出缓冲区
+    cudaMalloc(&d_input, 1008 * 1008 * 3);
+    cudaMalloc(&d_output, 1008 * 1008 * 3 * sizeof(float));
+    cudaStreamCreate(reinterpret_cast<cudaStream_t *>(&cuda_stream));
+    std::cout << "[Info] GPU preprocessing buffers allocated." << std::endl;
+  }
+#endif
+}
+
+SAM3Predictor::~SAM3Predictor() {
+#ifdef USE_CUDA
+  if (d_input)
+    cudaFree(d_input);
+  if (d_output)
+    cudaFree(d_output);
+  if (cuda_stream)
+    cudaStreamDestroy(static_cast<cudaStream_t>(cuda_stream));
+#endif
+}
+
+void SAM3Predictor::warmup() {
+  std::cout << "Warming up SAM3 models..." << std::endl;
+  ensure_grounding_models();
+  ensure_interactive_models();
+  std::cout << "Warmup completed. Models are ready in memory." << std::endl;
 }
 
 // 创建会话选项
 Ort::SessionOptions SAM3Predictor::get_session_options() {
   Ort::SessionOptions session_options;
-  session_options.SetIntraOpNumThreads(4);
+  // 设置为 0 表示由 ONNX Runtime 自动决定最佳线程数
+  session_options.SetIntraOpNumThreads(0);
   session_options.SetGraphOptimizationLevel(
       GraphOptimizationLevel::ORT_ENABLE_ALL);
 
   if (use_gpu) {
+
 #ifdef USE_CUDA
     OrtCUDAProviderOptions cuda_options;
     cuda_options.device_id = 0;
-    cuda_options.arena_extend_strategy =
-        1; // kSameAsRequested (Less fragmentation)
+    cuda_options.arena_extend_strategy = 1;
     session_options.AppendExecutionProvider_CUDA(cuda_options);
 #endif
   }
@@ -38,13 +78,30 @@ void SAM3Predictor::ensure_grounding_models() {
   if (g_encoder_session)
     return;
   std::cout << "Loading Grounding/Text models..." << std::endl;
-  auto opts = get_session_options();
-  g_encoder_session = std::make_unique<Ort::Session>(
-      env, (model_dir + "/sam3_grounding_encoder.onnx").c_str(), opts);
-  lang_session = std::make_unique<Ort::Session>(
-      env, (model_dir + "/sam3_language_encoder.onnx").c_str(), opts);
-  g_decoder_session = std::make_unique<Ort::Session>(
-      env, (model_dir + "/sam3_grounding_decoder.onnx").c_str(), opts);
+  auto start_load = std::chrono::high_resolution_clock::now();
+
+  auto load_models = [&]() {
+    auto opts = get_session_options();
+    g_encoder_session = std::make_unique<Ort::Session>(
+        env, (model_dir + "/sam3_grounding_encoder.onnx").c_str(), opts);
+    lang_session = std::make_unique<Ort::Session>(
+        env, (model_dir + "/sam3_language_encoder.onnx").c_str(), opts);
+    g_decoder_session = std::make_unique<Ort::Session>(
+        env, (model_dir + "/sam3_grounding_decoder.onnx").c_str(), opts);
+  };
+
+  load_models();
+
+  if (use_gpu) {
+    g_encoder_io = std::make_unique<Ort::IoBinding>(*g_encoder_session);
+  }
+
+  auto end_load = std::chrono::high_resolution_clock::now();
+  std::cout << "Model loading time: "
+            << std::chrono::duration_cast<std::chrono::milliseconds>(end_load -
+                                                                     start_load)
+                   .count()
+            << " ms" << std::endl;
 }
 
 // 确保加载 Interactive 模型
@@ -52,17 +109,28 @@ void SAM3Predictor::ensure_interactive_models() {
   if (i_encoder_session)
     return;
   std::cout << "Loading Interactive (Point/Box) models..." << std::endl;
-  auto opts = get_session_options();
-  i_encoder_session = std::make_unique<Ort::Session>(
-      env, (model_dir + "/sam3_encoder.onnx").c_str(), opts);
-  i_decoder_session = std::make_unique<Ort::Session>(
-      env, (model_dir + "/sam3_decoder.onnx").c_str(), opts);
+
+  auto load_models = [&]() {
+    auto opts = get_session_options();
+    i_encoder_session = std::make_unique<Ort::Session>(
+        env, (model_dir + "/sam3_encoder.onnx").c_str(), opts);
+    i_decoder_session = std::make_unique<Ort::Session>(
+        env, (model_dir + "/sam3_decoder.onnx").c_str(), opts);
+  };
+
+  load_models();
+  if (use_gpu) {
+    i_encoder_io = std::make_unique<Ort::IoBinding>(*i_encoder_session);
+  }
 }
 
 // 文本提示 -> Grounding Pipeline
 std::vector<SAM3Predictor::InferenceResult>
 SAM3Predictor::predict_text(const cv::Mat &bgr_img, const std::string &text,
                             float threshold, int max_detections) {
+  // 确保模型已加载 (不计入推理时间)
+  ensure_grounding_models();
+
   auto start = std::chrono::high_resolution_clock::now();
   auto result =
       run_grounding_inference(bgr_img, text, {}, {}, threshold, max_detections);
@@ -70,7 +138,8 @@ SAM3Predictor::predict_text(const cv::Mat &bgr_img, const std::string &text,
   auto duration =
       std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
           .count();
-  std::cout << "Inference time: " << duration << " ms" << std::endl;
+  std::cout << "Pure Inference time (Preprocessing + Forward): " << duration
+            << " ms" << std::endl;
   return result;
 }
 
@@ -79,6 +148,9 @@ std::vector<SAM3Predictor::InferenceResult>
 SAM3Predictor::predict_point(const cv::Mat &bgr_img, const cv::Point2f &point,
                              float threshold, int max_detections,
                              std::string label) {
+  // 确保模型已加载
+  ensure_interactive_models();
+
   auto start = std::chrono::high_resolution_clock::now();
   std::vector<cv::Point2f> points = {point};
   std::vector<int> labels = {1}; // 1 = 前景
@@ -103,6 +175,9 @@ std::vector<SAM3Predictor::InferenceResult>
 SAM3Predictor::predict_box(const cv::Mat &bgr_img, const cv::Rect2f &box,
                            float threshold, int max_detections,
                            std::string label) {
+  // 确保模型已加载
+  ensure_interactive_models();
+
   auto start = std::chrono::high_resolution_clock::now();
   std::vector<cv::Rect2f> boxes = {box};
   auto res = run_interactive_inference(bgr_img, {}, {}, boxes);
@@ -124,36 +199,46 @@ SAM3Predictor::predict_box(const cv::Mat &bgr_img, const cv::Rect2f &box,
 SAM3Predictor::InteractiveResult SAM3Predictor::run_interactive_inference(
     const cv::Mat &bgr_img, const std::vector<cv::Point2f> &points,
     const std::vector<int> &labels, const std::vector<cv::Rect2f> &boxes) {
-  // 0. 延迟加载 Interactive Models
-  ensure_interactive_models();
+  // 模型加载现在由上层 predict_xxx 函数显式调用
 
   // 1. 图像预处理 (1008x1008)
-  cv::Mat rgb_img;
-  cv::cvtColor(bgr_img, rgb_img, cv::COLOR_BGR2RGB);
-  cv::Mat resized_img;
-  cv::resize(rgb_img, resized_img, cv::Size(1008, 1008));
-  // 2. 归一化 (使用 0.5/0.5 归一化，与 Grounding 管道保持一致)
-  cv::Mat float_img;
-  resized_img.convertTo(float_img, CV_32F, 1.0 / 255.0);
-  cv::subtract(float_img, cv::Scalar(0.5, 0.5, 0.5), float_img);
-  cv::divide(float_img, cv::Scalar(0.5, 0.5, 0.5), float_img);
-
-  std::vector<float> input_tensor_values(1 * 3 * 1008 * 1008);
-  for (int c = 0; c < 3; ++c) {
-    for (int h = 0; h < 1008; ++h) {
-      for (int w = 0; w < 1008; ++w) {
-        input_tensor_values[c * 1008 * 1008 + h * 1008 + w] =
-            float_img.at<cv::Vec3f>(h, w)[c];
-      }
-    }
-  }
-
+  std::vector<int64_t> encoder_input_shape = {1, 3, 1008, 1008};
+  Ort::Value encoder_input_tensor{nullptr};
   auto memory_info =
       Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-  std::vector<int64_t> encoder_input_shape = {1, 3, 1008, 1008};
-  Ort::Value encoder_input_tensor = Ort::Value::CreateTensor<float>(
-      memory_info, input_tensor_values.data(), input_tensor_values.size(),
-      encoder_input_shape.data(), encoder_input_shape.size());
+
+#ifdef USE_CUDA
+  if (use_gpu && d_input && d_output) {
+    cv::Mat resized;
+    if (bgr_img.cols != 1008 || bgr_img.rows != 1008) {
+      cv::resize(bgr_img, resized, cv::Size(1008, 1008));
+    } else {
+      resized = bgr_img;
+    }
+    cudaMemcpyAsync(d_input, resized.data, 1008 * 1008 * 3,
+                    cudaMemcpyHostToDevice, (cudaStream_t)cuda_stream);
+    launch_preprocess((unsigned char *)d_input, (float *)d_output, 1008, 1008,
+                      true, (cudaStream_t)cuda_stream);
+
+    Ort::MemoryInfo mem_info_cuda("Cuda", OrtAllocatorType::OrtArenaAllocator,
+                                  0, OrtMemTypeDefault);
+    encoder_input_tensor = Ort::Value::CreateTensor<float>(
+        mem_info_cuda, (float *)d_output, 1008 * 1008 * 3,
+        encoder_input_shape.data(), encoder_input_shape.size());
+  } else {
+#endif
+    cv::Mat rgb_img;
+    cv::cvtColor(bgr_img, rgb_img, cv::COLOR_BGR2RGB);
+    cv::Mat input_blob = cv::dnn::blobFromImage(
+        rgb_img, 1.0 / 127.5, cv::Size(1008, 1008),
+        cv::Scalar(127.5, 127.5, 127.5), true, false, CV_32F);
+
+    encoder_input_tensor = Ort::Value::CreateTensor<float>(
+        memory_info, input_blob.ptr<float>(), input_blob.total(),
+        encoder_input_shape.data(), encoder_input_shape.size());
+#ifdef USE_CUDA
+  }
+#endif
 
   const char *encoder_input_names[] = {"images"};
   const char *encoder_output_names[] = {"pix_feat", "high_res_0", "high_res_1"};
@@ -249,37 +334,58 @@ SAM3Predictor::run_grounding_inference(
     const std::vector<float> &box_coords_in,
     const std::vector<int64_t> &box_labels_in, float threshold,
     int max_detections) {
-  // 0. 延迟加载 Grounding Models
-  ensure_grounding_models();
+  // 模型加载现在由上层 predict_xxx 函数显式调用
 
   // 1. 图像预处理 (1008x1008)
-  cv::Mat rgb_img;
-  cv::cvtColor(bgr_img, rgb_img, cv::COLOR_BGR2RGB);
-  cv::Mat resized_img;
-  cv::resize(rgb_img, resized_img, cv::Size(1008, 1008));
-  cv::Mat float_img;
-  resized_img.convertTo(float_img, CV_32F, 1.0 / 255.0);
-
-  // CLIP风格归一化
-  cv::subtract(float_img, cv::Scalar(0.5, 0.5, 0.5), float_img);
-  cv::divide(float_img, cv::Scalar(0.5, 0.5, 0.5), float_img);
-
-  std::vector<float> input_tensor_values(1 * 3 * 1008 * 1008);
-  for (int c = 0; c < 3; ++c) {
-    for (int h = 0; h < 1008; ++h) {
-      for (int w = 0; w < 1008; ++w) {
-        input_tensor_values[c * 1008 * 1008 + h * 1008 + w] =
-            float_img.at<cv::Vec3f>(h, w)[c];
-      }
-    }
-  }
-
+  auto start_pre = std::chrono::high_resolution_clock::now();
+  std::vector<int64_t> encoder_input_shape = {1, 3, 1008, 1008};
+  Ort::Value encoder_input_tensor{nullptr};
   auto memory_info =
       Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-  std::vector<int64_t> encoder_input_shape = {1, 3, 1008, 1008};
-  Ort::Value encoder_input_tensor = Ort::Value::CreateTensor<float>(
-      memory_info, input_tensor_values.data(), input_tensor_values.size(),
-      encoder_input_shape.data(), encoder_input_shape.size());
+
+#ifdef USE_CUDA
+  if (use_gpu && d_input && d_output) {
+    // 确保输入尺寸正确
+    cv::Mat resized;
+    if (bgr_img.cols != 1008 || bgr_img.rows != 1008) {
+      cv::resize(bgr_img, resized, cv::Size(1008, 1008));
+    } else {
+      resized = bgr_img;
+    }
+
+    // 拷贝到 GPU
+    cudaMemcpyAsync(d_input, resized.data, 1008 * 1008 * 3,
+                    cudaMemcpyHostToDevice, (cudaStream_t)cuda_stream);
+    // 调用 CUDA 核函数 (BGR to RGB + Normalization)
+    launch_preprocess((unsigned char *)d_input, (float *)d_output, 1008, 1008,
+                      true, (cudaStream_t)cuda_stream);
+
+    // 绑定到 ORT (采用零拷贝方式创建 Tensor)
+    Ort::MemoryInfo mem_info_cuda("Cuda", OrtAllocatorType::OrtArenaAllocator,
+                                  0, OrtMemTypeDefault);
+    encoder_input_tensor = Ort::Value::CreateTensor<float>(
+        mem_info_cuda, (float *)d_output, 1008 * 1008 * 3,
+        encoder_input_shape.data(), encoder_input_shape.size());
+  } else {
+#endif
+    cv::Mat rgb_img;
+    cv::cvtColor(bgr_img, rgb_img, cv::COLOR_BGR2RGB);
+    cv::Mat input_blob = cv::dnn::blobFromImage(
+        rgb_img, 1.0 / 127.5, cv::Size(1008, 1008),
+        cv::Scalar(127.5, 127.5, 127.5), true, false, CV_32F);
+
+    encoder_input_tensor = Ort::Value::CreateTensor<float>(
+        memory_info, input_blob.ptr<float>(), input_blob.total(),
+        encoder_input_shape.data(), encoder_input_shape.size());
+#ifdef USE_CUDA
+  }
+#endif
+  auto end_pre = std::chrono::high_resolution_clock::now();
+  std::cout << "Preprocessing time: "
+            << std::chrono::duration_cast<std::chrono::milliseconds>(end_pre -
+                                                                     start_pre)
+                   .count()
+            << " ms" << std::endl;
 
   // 2. Grounding可用的编码器推理
   const char *encoder_input_names[] = {"images"};
@@ -287,11 +393,13 @@ SAM3Predictor::run_grounding_inference(
                                         "vpe0",  "vpe1",  "vpe2"};
   std::vector<Ort::Value> encoder_outputs;
 
+  auto start_enc = std::chrono::high_resolution_clock::now();
   try {
     encoder_outputs = g_encoder_session->Run(
         Ort::RunOptions{nullptr}, encoder_input_names, &encoder_input_tensor, 1,
         encoder_output_names, 6);
   } catch (const Ort::Exception &e) {
+    // ... (omitted catch block content for brevity)
     if (use_gpu) {
       std::cerr << "[Warning] GPU Inference failed (likely OOM: " << e.what()
                 << "). Falling back to CPU..." << std::endl;
@@ -309,6 +417,12 @@ SAM3Predictor::run_grounding_inference(
     }
     throw e; // 如果已经是CPU或无法处理，则抛出异常
   }
+  auto end_enc = std::chrono::high_resolution_clock::now();
+  std::cout << "Image encoder time: "
+            << std::chrono::duration_cast<std::chrono::milliseconds>(end_enc -
+                                                                     start_enc)
+                   .count()
+            << " ms" << std::endl;
 
   // 3. 语言编码器推理
   auto tokenized = tokenizer.tokenize({text}, 32);
@@ -324,9 +438,16 @@ SAM3Predictor::run_grounding_inference(
   const char *lang_input_names[] = {"tokens"};
   const char *lang_output_names[] = {"text_attention_mask", "text_memory",
                                      "text_embeds"};
+  auto start_lang = std::chrono::high_resolution_clock::now();
   auto lang_outputs =
       lang_session->Run(Ort::RunOptions{nullptr}, lang_input_names,
                         &tokens_tensor, 1, lang_output_names, 3);
+  auto end_lang = std::chrono::high_resolution_clock::now();
+  std::cout << "Language encoder time: "
+            << std::chrono::duration_cast<std::chrono::milliseconds>(end_lang -
+                                                                     start_lang)
+                   .count()
+            << " ms" << std::endl;
 
   // 4. Grounding解码器推理
   std::vector<Ort::Value> decoder_inputs;
@@ -374,9 +495,16 @@ SAM3Predictor::run_grounding_inference(
                                        "box_coords", "box_labels", "box_masks"};
   const char *decoder_output_names[] = {"boxes", "scores", "masks", "presence"};
 
+  auto start_dec = std::chrono::high_resolution_clock::now();
   auto decoder_outputs = g_decoder_session->Run(
       Ort::RunOptions{nullptr}, decoder_input_names, decoder_inputs.data(),
       decoder_inputs.size(), decoder_output_names, 4);
+  auto end_dec = std::chrono::high_resolution_clock::now();
+  std::cout << "Grounding decoder time: "
+            << std::chrono::duration_cast<std::chrono::milliseconds>(end_dec -
+                                                                     start_dec)
+                   .count()
+            << " ms" << std::endl;
 
   // 5. 后处理
   float *boxes_ptr = decoder_outputs[0].GetTensorMutableData<float>();

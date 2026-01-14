@@ -4,6 +4,13 @@ project(SAM3_Inference)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# 启用 CUDA 语言支持
+enable_language(CUDA)
+
+# 现代 FindCUDAToolkit 方式用于库路径
+find_package(CUDAToolkit REQUIRED)
+set(CMAKE_CUDA_ARCHITECTURES 75) # RTX 2060 对应的架构
+
 # 选项:是否使用GPU版本的ONNX Runtime
 option(USE_GPU "Use GPU version of ONNX Runtime" OFF)
 
@@ -34,10 +41,17 @@ include_directories(${ORT_INCLUDE_DIR})
 link_directories(${ORT_LIB_DIR})
 
 # 添加可执行文件
-add_executable(sam3_inference sam3_inference.cpp SAM3Predictor.cpp SimpleTokenizer.cpp)
+add_executable(sam3_inference 
+    sam3_inference.cpp 
+    SAM3Predictor.cpp 
+    SimpleTokenizer.cpp 
+    Preprocessing.cu
+)
 
-# 链接库
+# 链接库及头文件
+target_include_directories(sam3_inference PRIVATE ${OpenCV_INCLUDE_DIRS} ${ORT_INCLUDE_DIR} ${CUDA_INCLUDE_DIRS})
 target_link_libraries(sam3_inference 
     ${OpenCV_LIBS}
     onnxruntime
+    CUDA::cudart
 )

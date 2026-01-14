@@ -213,12 +213,9 @@ def export_interactive_encoder(int_model):
     print("Exporting Interactive Encoder (1008x1008)...")
     encoder = SAM3Encoder(int_model).eval()
     dummy_img = torch.randn(1, 3, 1008, 1008)
-    backbone = int_model.image_encoder
-    if hasattr(backbone, 'set_imgsz'):
-        backbone.set_imgsz([1008, 1008])
 
     torch.onnx.export(
-        encoder, (dummy_img,), "model/sam3_encoder.onnx",
+        encoder, (dummy_img,), os.path.join(os.path.dirname(__file__), "sam3_encoder.onnx"),
         input_names=["images"],output_names=["pix_feat", "high_res_0", "high_res_1"],
         opset_version=14, dynamo=False
     )
@@ -228,9 +225,6 @@ def export_interactive_decoder(int_model):
     print("Exporting Interactive Decoder...")
     encoder = SAM3Encoder(int_model).eval()
     dummy_img = torch.randn(1, 3, 1008, 1008)
-    backbone = int_model.image_encoder
-    if hasattr(backbone, 'set_imgsz'):
-        backbone.set_imgsz([1008, 1008])
         
     with torch.no_grad():
         pix_feat, hr0, hr1 = encoder(dummy_img)
@@ -242,7 +236,7 @@ def export_interactive_decoder(int_model):
     torch.onnx.export(
         decoder,
         (pix_feat, hr0, hr1, dummy_point_coords, dummy_point_labels),
-        "model/sam3_decoder.onnx",
+        os.path.join(os.path.dirname(__file__), "sam3_decoder.onnx"),
         input_names=["pix_feat", "high_res_0", "high_res_1", "point_coords", "point_labels"],
         output_names=["masks", "ious"],
         opset_version=14, dynamo=False,
@@ -261,7 +255,7 @@ def export_language_encoder(sem_model):
     lang_encoder = SAM3LanguageEncoder(sem_model).eval()
     dummy_tokens = torch.randint(0, 49408, (1, 32)).long()
     torch.onnx.export(
-        lang_encoder, (dummy_tokens,), "model/sam3_language_encoder.onnx",
+        lang_encoder, (dummy_tokens,), os.path.join(os.path.dirname(__file__), "sam3_language_encoder.onnx"),
         input_names=["tokens"], output_names=["text_attention_mask", "text_memory", "text_embeds"],
         opset_version=14, dynamo=False,
         dynamic_axes={"tokens": {0: "batch_size"}, "text_attention_mask": {0: "batch_size"}, 
@@ -274,7 +268,7 @@ def export_grounding_encoder(sem_model):
     gr_encoder = SAM3GroundingEncoder(sem_model).cpu().eval()
     dummy_img = torch.randn(1, 3, 1008, 1008).cpu()
     torch.onnx.export(
-        gr_encoder, (dummy_img,), "model/sam3_grounding_encoder.onnx",
+        gr_encoder, (dummy_img,), os.path.join(os.path.dirname(__file__), "sam3_grounding_encoder.onnx"),
         input_names=["images"], output_names=["feat0", "feat1", "feat2", "vpe0", "vpe1", "vpe2"],
         opset_version=14, dynamo=False
     )
@@ -296,7 +290,7 @@ def export_grounding_decoder(sem_model):
     torch.onnx.export(
         decoder, 
         (feat0, feat1, feat2, vpe0, vpe1, vpe2, lang_mask, lang_feat, box_coords, box_labels, box_masks), 
-        "model/sam3_grounding_decoder.onnx", 
+        os.path.join(os.path.dirname(__file__), "sam3_grounding_decoder.onnx"), 
         input_names=["feat0", "feat1", "feat2", "vpe0", "vpe1", "vpe2", "lang_mask", "lang_feat", "box_coords", "box_labels", "box_masks"], 
         output_names=["boxes", "scores", "masks", "presence"], 
         opset_version=14, dynamo=False, 
@@ -318,7 +312,7 @@ def export_grounding_decoder(sem_model):
 
 def main():
     stage = os.environ.get("EXPORT_STAGE", "all")
-    model_path = "model/sam3.pt"
+    model_path = os.path.join(os.path.dirname(__file__), "sam3.pt")
     
     print(f"Loading models from {model_path}...")
     

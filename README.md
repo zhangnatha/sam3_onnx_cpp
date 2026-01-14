@@ -67,10 +67,10 @@ pip install ultralytics onnx transformers
 
 ```bash
 # 1. 导出 ONNX 模型 (包含 Interactive 与 Grounding 管道)
-python model/export_sam3_onnx.py
+conda run -n sam3_cpp python model/export_sam3_onnx.py
 
 # 2. 导出分词器资源 (vocab.txt, merges.txt)
-python model/export_tokenizer.py
+conda run -n sam3_cpp python model/export_tokenizer.py
 ```
 
 有关导出脚本的详细参数说明、各个模型文件的具体作用以及兼容性补丁的说明，请参考：
