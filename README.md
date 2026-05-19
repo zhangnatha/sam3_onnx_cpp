@@ -63,7 +63,7 @@ pip install ultralytics onnx transformers
 
 ## 模型准备 (PyTorch 转 ONNX)
 
-在运行 C++ 推理引擎前，需要将 [SAM3 Pytorch 模型](https://drive.google.com/file/d/1zeiVSlAkVO4Tk2O-R7H3n1gYK2zi43Z3/view?usp=sharing) (参数量为 8,6123,5128个参数) 导出为 [ONNX](https://drive.google.com/drive/folders/1TrYTcESFMx46Q0D7rgo0NwJVw1I4jv1i?usp=sharing) 格式，并准备[分词器资源](https://drive.google.com/drive/folders/17_tnZ4Cu5t7Q0b9K1aFLAK_PTw4eXzpt?usp=sharing)。
+在运行 C++ 推理引擎前，需要将 [SAM3 Pytorch 模型](https://www.kaggle.com/models/jazhangdataset/sam3-onnx?select=sam3.pt) (参数量为 8,6123,5128个参数) 导出为 [ONNX](https://www.kaggle.com/models/jazhangdataset/sam3-onnx) 格式，并准备[分词器资源](https://www.kaggle.com/models/jazhangdataset/sam3-onnx)。
 
 ```bash
 # 1. 导出 ONNX 模型 (包含 Interactive 与 Grounding 管道)
