@@ -12,16 +12,15 @@ def export_tokenizer(output_dir="."):
     # 加载标准的 CLIP 分词器
     # 注意：这需要联网或已缓存相关权重
     try:
+        from huggingface_hub import hf_hub_download
+        
+        # 1. 获取 merges.txt
+        merges_src = hf_hub_download(repo_id="openai/clip-vit-base-patch32", filename="merges.txt")
+        merges_dest = os.path.join(output_dir, "merges.txt")
+        shutil.copyfile(merges_src, merges_dest)
+
+        # 2. 获取 vocab.txt (从 CLIPTokenizer 词表导出)
         tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32")
-        
-        # 1. 导出 merges.txt
-        # transformers 的 save_vocabulary 会导出 vocab.json 和 merges.txt
-        # 我们只需要 merges.txt 和 转换后的 vocab.txt
-        tokenizer.save_vocabulary(output_dir)
-        
-        # 2. 准备 vocab.txt
-        # C++ 端通常期望一个每行一个 token 的文本文件
-        # 我们从词表中提取并按索引排序写入
         vocab = tokenizer.get_vocab()
         ordered_vocab = sorted(vocab.items(), key=lambda x: x[1])
         
@@ -30,10 +29,11 @@ def export_tokenizer(output_dir="."):
             for token, index in ordered_vocab:
                 f.write(f"{token}\n")
         
-        # 清理多余的 vocab.json (如果存在)
-        json_path = os.path.join(output_dir, "vocab.json")
-        if os.path.exists(json_path):
-            os.remove(json_path)
+        # 清理多余临时文件 (如果存在)
+        for extra in ["vocab.json", "tokenizer.model"]:
+            p = os.path.join(output_dir, extra)
+            if os.path.exists(p):
+                os.remove(p)
             
         print("Success! Generated files:")
         print(f"  - {os.path.join(output_dir, 'vocab.txt')}")
@@ -41,7 +41,7 @@ def export_tokenizer(output_dir="."):
         
     except Exception as e:
         print(f"Error: {e}")
-        print("Tip: Make sure you have 'transformers' installed and network access.")
+        print("Tip: Make sure you have 'transformers' and 'huggingface_hub' installed and network access.")
 
 if __name__ == "__main__":
     # 默认在脚本所在目录生成

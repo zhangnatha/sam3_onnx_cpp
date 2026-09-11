@@ -1,35 +1,60 @@
 #!/bin/bash
+set -euo pipefail
 
-# 设置退出条件：任何命令失败时退出
-set -e
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INSTALL_GPU_DIR="${SCRIPT_DIR}/3rdparty/onnxruntime-gpu"
+INSTALL_CPU_DIR="${SCRIPT_DIR}/3rdparty/onnxruntime-cpu"
+ORT_VERSION="1.17.3"
 
-# 定义安装路径
-SOURCE_DIR="$(pwd)"
-INSTALL_GPU_DIR="$(pwd)/3rdparty/onnxruntime-gpu"
-INSTALL_CPU_DIR="$(pwd)/3rdparty/onnxruntime-cpu"
+mkdir -p "${SCRIPT_DIR}/3rdparty"
 
-# 1. 下载onnxruntime CPU/GPU
-echo "下载onnxruntime lib..."
-# GPU
-wget https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/onnxruntime-linux-x64-gpu-cuda12-1.17.3.tgz
-# CPU
-wget https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/onnxruntime-linux-x64-1.17.3.tgz
+# 检测 CUDA 版本
+CUDA_MAJOR=12
+if command -v nvcc &> /dev/null; then
+    CUDA_VER=$(nvcc --version | grep "release" | sed -n -e 's/^.*release \([0-9]\+\.[0-9]\+\).*/\1/p')
+    CUDA_MAJOR=$(echo "$CUDA_VER" | cut -d'.' -f1)
+    echo "检测到系统 CUDA 版本: $CUDA_VER (主版本: $CUDA_MAJOR)"
+fi
 
-# 2. 安装onnxruntime CPU/GPU
-echo "解压 GPU 版本库..."
-tar -xzf onnxruntime-linux-x64-gpu-cuda12-1.17.3.tgz -C "$SOURCE_DIR"
-echo "解压 CPU 版本库..."
-tar -xzf onnxruntime-linux-x64-1.17.3.tgz -C "$SOURCE_DIR"
+if [ "$CUDA_MAJOR" -eq 11 ]; then
+    GPU_TGZ="onnxruntime-linux-x64-gpu-${ORT_VERSION}.tgz"
+else
+    GPU_TGZ="onnxruntime-linux-x64-gpu-cuda12-${ORT_VERSION}.tgz"
+fi
+CPU_TGZ="onnxruntime-linux-x64-${ORT_VERSION}.tgz"
 
-# 创建目标目录（如果不存在）
-mkdir -p "$INSTALL_GPU_DIR"
-mkdir -p "$INSTALL_CPU_DIR"
-mv "$SOURCE_DIR/onnxruntime-linux-x64-gpu-1.17.3"/* "$INSTALL_GPU_DIR/"
-mv "$SOURCE_DIR/onnxruntime-linux-x64-1.17.3"/* "$INSTALL_CPU_DIR/"
+CPU_URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${CPU_TGZ}"
+GPU_URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${GPU_TGZ}"
 
-# 3. 清理下载的压缩文件
-echo "清除..."
-rm onnxruntime-linux-x64-gpu-cuda12-1.17.3.tgz 
-rm -rf onnxruntime-linux-x64-gpu-1.17.3
-rm onnxruntime-linux-x64-1.17.3.tgz
-rm -rf onnxruntime-linux-x64-1.17.3
+echo "=========================================="
+echo "安装 ONNX Runtime ${ORT_VERSION}"
+echo "  CPU  -> ${INSTALL_CPU_DIR}"
+echo "  GPU  -> ${INSTALL_GPU_DIR}"
+echo "=========================================="
+
+download_and_extract() {
+    local url="$1"
+    local tgz="$2"
+    local dest="$3"
+
+    echo "下载 $tgz ..."
+    wget -c "$url" -O "$tgz"
+    
+    echo "解压 $tgz 到 $dest ..."
+    local tmp_dir
+    tmp_dir=$(mktemp -d "${SCRIPT_DIR}/.ort_tmp_XXXXXX")
+    tar -xzf "$tgz" -C "$tmp_dir"
+    
+    local extracted_dir
+    extracted_dir=$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+    
+    mkdir -p "$dest"
+    cp -r "$extracted_dir"/* "$dest/"
+    
+    rm -rf "$tmp_dir" "$tgz"
+}
+
+download_and_extract "$CPU_URL" "$CPU_TGZ" "$INSTALL_CPU_DIR"
+download_and_extract "$GPU_URL" "$GPU_TGZ" "$INSTALL_GPU_DIR"
+
+echo "ONNX Runtime ${ORT_VERSION} 安装完成！"

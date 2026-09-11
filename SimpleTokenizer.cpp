@@ -13,9 +13,15 @@ SimpleTokenizer::SimpleTokenizer(const std::string &vocab_path,
 
   // 加载词表
   std::ifstream vocab_file(vocab_path);
+  if (!vocab_file.is_open()) {
+    throw std::runtime_error("Failed to open vocab file: " + vocab_path);
+  }
+
   std::string line;
   int current_id = 0;
   while (std::getline(vocab_file, line)) {
+    if (!line.empty() && line.back() == '\r')
+      line.pop_back();
     if (line.empty() && vocab_file.eof())
       break;
     // 来自 export_tokenizer.py 的词表文件每行包含一个 token
@@ -27,9 +33,16 @@ SimpleTokenizer::SimpleTokenizer(const std::string &vocab_path,
 
   // 加载合并规则 (merges)
   std::ifstream merges_file(merges_path);
+  if (!merges_file.is_open()) {
+    throw std::runtime_error("Failed to open merges file: " + merges_path);
+  }
+
   int rank = 0;
   while (std::getline(merges_file, line)) {
-    if (line.empty())
+    if (!line.empty() && line.back() == '\r')
+      line.pop_back();
+    // 跳过空行以及 #version 等注释行
+    if (line.empty() || line[0] == '#')
       continue;
     std::istringstream iss(line);
     std::string first, second;
@@ -130,8 +143,9 @@ std::string SimpleTokenizer::bpe(const std::string &token) {
     int min_rank = -1;
 
     for (auto const &pair : pairs) {
-      if (bpe_ranks.count(pair)) {
-        int r = bpe_ranks[pair];
+      auto it = bpe_ranks.find(pair);
+      if (it != bpe_ranks.end()) {
+        int r = it->second;
         if (min_rank == -1 || r < min_rank) {
           min_rank = r;
           bigram = pair;
@@ -192,8 +206,9 @@ std::vector<int> SimpleTokenizer::encode(const std::string &text) {
     std::stringstream ss(bpe_res);
     std::string part;
     while (ss >> part) {
-      if (encoder.count(part)) {
-        bpe_tokens.push_back(encoder[part]);
+      auto it = encoder.find(part);
+      if (it != encoder.end()) {
+        bpe_tokens.push_back(it->second);
       }
     }
   }

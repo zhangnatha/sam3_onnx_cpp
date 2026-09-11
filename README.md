@@ -81,8 +81,8 @@ conda run -n sam3_cpp python model/export_tokenizer.py
 你也可以运行 Python 推理脚本，使用原始 Ultralytics SAM3 模型实现进行对比测试或快速验证。
 
 ```bash
-# 使用 sam3.pt 运行 Python 推理
-conda run -n sam3_cpp python inference.py
+# 使用 sam3.pt 运行 Python 推理 (需要先下载 sam3.pt)
+conda run -n sam3_cpp python model/sam3_inference.py
 ```
 
 ## 编译和运行
@@ -111,15 +111,18 @@ make -j$(nproc)
 选项:
   --image <路径>          输入图像路径 (必需)
   --output <路径>         输出图像路径 (默认: result.jpg)
+  --model <路径>          模型目录路径 (默认: 自动搜索 './model' 或 '../model')
   --mode <类型>           提示模式: texts|points|boxes (默认: texts)
   --prompt <值>           提示值:
-                          - texts: 文本字符串 (例如: 'person')
+                          - texts: 文本字符串或逗号分隔 (例如: 'cat,computer')
                           - points: x,y坐标 (例如: '100,200')
                           - boxes: x1,y1,x2,y2坐标 (例如: '100,100,200,200')
   --label <名称>          点或框的类别标签 (默认: 'object')
   --threshold <值>        置信度阈值 (默认: 0.25)
+  --nms <值>              NMS 重叠抑制 IoU 阈值 (默认: 0.5, 0 为禁用)
   --max-detections <数量> 最大检测数量 (默认: 0 = 无限制)
   --gpu                   使用GPU加速 (如果可用)
+  --warmup                预热模型以避免初次推理延迟
   --help                  显示帮助信息
 ```
 
